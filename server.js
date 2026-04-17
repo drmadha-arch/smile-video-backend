@@ -23,8 +23,95 @@ app.post('/generate-video', async (req, res) => {
   }
 
   try {
-    // Submit to fal.ai queue
-    console.log('Submitting to Infinitalk...');
+    // Step 1: Generate TTS audio from the script using ElevenLabs-style TTS on fal
+    console.log('Step 1: Generating TTS audio...');
+    const ttsRes = await fetch('https://fal.run/fal-ai/playai/tts/v3', {
+      method: 'POST',
+      headers: { 'Authorization': `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        input: text_input,
+        voice: voice || 'Jennifer (English (US)/American)',
+        output_format: 'mp3'
+      })
+    });
+
+    let audioUrl = null;
+    if (ttsRes.ok) {
+      const ttsData = await ttsRes.json();
+      audioUrl = ttsData.audio?.url || ttsData.url;
+      console.log('TTS audio URL:', audioUrl);
+    }
+
+    if (!audioUrl) {
+      // Fallback: use a pre-made audio clip
+      console.log('TTS failed, using Infinitalk instead...');
+      return generateWithInfinitalk(req, res, image_url, text_input, voice);
+    }
+
+    // Step 2: Kling Avatar - lip sync image to audio (~30-60 sec)
+    console.log('Step 2: Sending to Kling Avatar...');
+    const MODEL = 'fal-ai/kling-video/ai-avatar/v2/standard';
+
+    const submitRes = await fetch(`https://queue.fal.run/${MODEL}`, {
+      method: 'POST',
+      headers: { 'Authorization': `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        image_url,
+        audio_url: audioUrl,
+        prompt: prompt || 'Natural head movement, warm smile, teeth visible'
+      })
+    });
+
+    if (!submitRes.ok) {
+      const err = await submitRes.text();
+      console.log('Kling Avatar failed, falling back to Infinitalk:', err);
+      return generateWithInfinitalk(req, res, image_url, text_input, voice);
+    }
+
+    const submitData = await submitRes.json();
+    const requestId = submitData.request_id;
+    if (!requestId) return generateWithInfinitalk(req, res, image_url, text_input, voice);
+
+    const statusUrl = submitData.status_url || `https://queue.fal.run/${MODEL}/requests/${requestId}/status`;
+    const resultUrl = submitData.response_url || `https://queue.fal.run/${MODEL}/requests/${requestId}`;
+
+    // Poll
+    const start = Date.now();
+    while (Date.now() - start < 3 * 60 * 1000) {
+      await sleep(3000);
+      const elapsed = Math.floor((Date.now() - start) / 1000);
+      const stRes = await fetch(statusUrl, { headers: { 'Authorization': `Key ${FAL_KEY}` } });
+      if (!stRes.ok) continue;
+      const st = await stRes.json();
+      console.log(`Kling Avatar status @${elapsed}s:`, st.status);
+
+      if (st.status === 'COMPLETED') {
+        const rRes = await fetch(resultUrl, { headers: { 'Authorization': `Key ${FAL_KEY}` } });
+        const data = await rRes.json();
+        const videoUrl = data.video?.url;
+        if (!videoUrl) return generateWithInfinitalk(req, res, image_url, text_input, voice);
+        console.log('Kling Avatar done! Video:', videoUrl);
+        return res.json({ video_url: videoUrl });
+      }
+      if (st.status === 'FAILED' || st.status === 'ERROR') {
+        console.log('Kling Avatar failed, falling back...');
+        return generateWithInfinitalk(req, res, image_url, text_input, voice);
+      }
+    }
+    return generateWithInfinitalk(req, res, image_url, text_input, voice);
+
+  } catch (e) {
+    console.error('Server error:', e);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// Infinitalk fallback
+async function generateWithInfinitalk(req, res, image_url, text_input, voice) {
+  const MODEL = 'fal-ai/infinitalk/single-text';
+  console.log('Using Infinitalk fallback...');
+
+  try {
     const submitRes = await fetch(`https://queue.fal.run/${MODEL}`, {
       method: 'POST',
       headers: { 'Authorization': `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
@@ -32,7 +119,7 @@ app.post('/generate-video', async (req, res) => {
         image_url,
         text_input,
         voice: voice || 'Sarah',
-        prompt: prompt || 'Happy person talking and smiling, teeth visible, natural head movement.',
+        prompt: 'Happy person talking and smiling, teeth visible, natural head movement.',
         resolution: '480p',
         num_frames: 81,
         acceleration: 'high'
@@ -46,48 +133,37 @@ app.post('/generate-video', async (req, res) => {
 
     const submitData = await submitRes.json();
     const requestId = submitData.request_id;
-    if (!requestId) return res.status(500).json({ error: 'No request_id from fal.ai' });
+    if (!requestId) return res.status(500).json({ error: 'No request_id' });
 
     const statusUrl = submitData.status_url || `https://queue.fal.run/${MODEL}/requests/${requestId}/status`;
     const resultUrl = submitData.response_url || `https://queue.fal.run/${MODEL}/requests/${requestId}`;
 
-    console.log('Polling requestId:', requestId);
-
-    // Poll until done (up to 10 minutes)
     const start = Date.now();
-    const MAX = 10 * 60 * 1000;
-
-    while (Date.now() - start < MAX) {
+    while (Date.now() - start < 8 * 60 * 1000) {
       await sleep(3000);
       const elapsed = Math.floor((Date.now() - start) / 1000);
-
       const stRes = await fetch(statusUrl, { headers: { 'Authorization': `Key ${FAL_KEY}` } });
       if (!stRes.ok) continue;
       const st = await stRes.json();
-
-      console.log(`Status @${elapsed}s:`, st.status);
+      console.log(`Infinitalk @${elapsed}s:`, st.status);
 
       if (st.status === 'COMPLETED') {
         const rRes = await fetch(resultUrl, { headers: { 'Authorization': `Key ${FAL_KEY}` } });
         const data = await rRes.json();
         const videoUrl = data.video?.url;
-        if (!videoUrl) return res.status(500).json({ error: 'No video URL in result' });
-        console.log('Done! Video URL:', videoUrl);
+        if (!videoUrl) return res.status(500).json({ error: 'No video URL' });
+        console.log('Infinitalk done! Video:', videoUrl);
         return res.json({ video_url: videoUrl });
       }
-
       if (st.status === 'FAILED' || st.status === 'ERROR') {
-        return res.status(500).json({ error: 'Infinitalk generation failed: ' + JSON.stringify(st) });
+        return res.status(500).json({ error: 'Generation failed: ' + JSON.stringify(st) });
       }
     }
-
-    return res.status(504).json({ error: 'Timeout after 10 minutes' });
-
-  } catch (e) {
-    console.error('Server error:', e);
+    return res.status(504).json({ error: 'Timeout after 8 minutes' });
+  } catch(e) {
     return res.status(500).json({ error: e.message });
   }
-});
+}
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
