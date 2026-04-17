@@ -5,11 +5,50 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
-const FAL_KEY = process.env.FAL_KEY;
-const MODEL = 'fal-ai/infinitalk/single-text';
+const FAL_KEY    = process.env.FAL_KEY;
+const GOOGLE_KEY = process.env.GOOGLE_KEY;
+
+const GEMINI_MODELS = [
+  'gemini-2.5-flash-image',
+  'gemini-2.5-flash-image-preview',
+  'gemini-2.0-flash-preview-image-generation',
+  'gemini-2.0-flash-exp-image-generation'
+];
 
 // Health check
-app.get('/', (req, res) => res.json({ status: 'ok', service: 'Smile Video Backend' }));
+app.get('/', (req, res) => res.json({ status: 'ok', service: 'Smile Design Backend' }));
+
+// Generate smile photo
+app.post('/generate-smile', async (req, res) => {
+  const { image_b64, mime, prompt } = req.body;
+  if (!image_b64 || !prompt) return res.status(400).json({ error: 'image_b64 and prompt required' });
+  if (!GOOGLE_KEY) return res.status(500).json({ error: 'GOOGLE_KEY not set on server' });
+
+  const body = JSON.stringify({
+    contents: [{ parts: [
+      { inline_data: { mime_type: mime || 'image/jpeg', data: image_b64 } },
+      { text: prompt }
+    ]}],
+    generationConfig: { responseModalities: ['IMAGE', 'TEXT'] }
+  });
+
+  let lastErr = '';
+  for (const model of GEMINI_MODELS) {
+    try {
+      const r = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GOOGLE_KEY}`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }
+      );
+      const d = await r.json();
+      if (d.error) { lastErr = `${model}: ${d.error.message}`; continue; }
+      for (const c of d.candidates || [])
+        for (const p of c.content?.parts || [])
+          if (p.inlineData?.data) return res.json({ image_b64: p.inlineData.data });
+      lastErr = `${model}: no image returned`;
+    } catch(e) { lastErr = e.message; }
+  }
+  return res.status(500).json({ error: lastErr });
+});
 
 // Generate talking video
 app.post('/generate-video', async (req, res) => {
