@@ -23,15 +23,14 @@ app.post('/generate-video', async (req, res) => {
   }
 
   try {
-    // Step 1: Generate TTS audio from the script using ElevenLabs-style TTS on fal
+    // Step 1: Generate TTS audio
     console.log('Step 1: Generating TTS audio...');
-    const ttsRes = await fetch('https://fal.run/fal-ai/playai/tts/v3', {
+    const ttsRes = await fetch('https://fal.run/fal-ai/kokoro/american-english', {
       method: 'POST',
       headers: { 'Authorization': `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        input: text_input,
-        voice: voice || 'Jennifer (English (US)/American)',
-        output_format: 'mp3'
+        prompt: text_input,
+        voice: voice && voice.includes('Roger') || voice === 'Liam' || voice === 'Will' || voice === 'Chris' || voice === 'Brian' ? 'am_adam' : 'af_sarah'
       })
     });
 
